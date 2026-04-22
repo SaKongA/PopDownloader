@@ -1,25 +1,47 @@
 {
   "name": "popDownloader",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Local-first popDownloader app built with Vue, Naive UI, xicons, and Express.",
+  "main": "server/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "dev": "concurrently \"npm:dev:web\" \"npm:dev:server\"",
+    "dev:web": "vite",
+    "dev:server": "nodemon server/index.js",
+    "build": "vite build",
+    "start": "node server/index.js"
   },
-  "keywords": [],
-  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SaKongA/PopDownloader.git"
+  },
+  "keywords": [
+    "vue",
+    "naive-ui",
+    "express",
+    "desktop-local"
+  ],
+  "author": "jason",
   "license": "ISC",
-  "description": "",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/SaKongA/PopDownloader/issues"
+  },
+  "homepage": "https://github.com/SaKongA/PopDownloader#readme",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@vicons/ionicons5": "^0.13.0",
     "archiver": "^7.0.1",
-    "axios": "^1.7.7",
-    "cheerio": "^1.0.0",
-    "element-ui": "^2.15.14",
-    "express": "^4.21.1",
-    "ffmpeg": "^0.0.4",
+    "express": "^5.2.1",
+    "flac-tagger": "^2.0.0",
     "fluent-ffmpeg": "^2.1.3",
-    "jsdom": "^25.0.1",
-    "socket.io": "^4.8.1"
+    "lottie-web": "^5.13.0",
+    "naive-ui": "^2.44.1",
+    "vue": "^3.5.33"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.6",
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.1.14",
+    "vite": "^8.0.9"
   }
 }
