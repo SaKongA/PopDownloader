@@ -76,3 +76,30 @@ export async function fetchOneClickLoginSupport() {
 
   return payload
 }
+
+export async function fetchFileLoginSupport({ fileName, fileContentBase64 }) {
+  const response = await fetch('/api/auth/file-login-support', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      file_name: fileName,
+      file_content_base64: fileContentBase64,
+    }),
+  })
+
+  let payload = null
+
+  try {
+    payload = await response.json()
+  } catch {
+    throw new Error('解析 Cookies 文件失败')
+  }
+
+  if (!response.ok) {
+    throw new Error(payload?.error || payload?.message || '解析 Cookies 文件失败')
+  }
+
+  return payload
+}

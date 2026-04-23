@@ -1,6 +1,7 @@
 const healthApi = require('./health')
 const authQrcodeApi = require('./auth-qrcode')
 const authQrcodeStatusApi = require('./auth-qrcode-status')
+const authFileLoginSupportApi = require('./auth-file-login-support')
 const authOneClickSupportApi = require('./auth-one-click-support')
 const authProfileApi = require('./auth-profile')
 const mePlaylistsApi = require('./me-playlists')
@@ -19,6 +20,7 @@ module.exports = [
   healthApi,
   authQrcodeApi,
   authQrcodeStatusApi,
+  authFileLoginSupportApi,
   authOneClickSupportApi,
   authProfileApi,
   mePlaylistsApi,

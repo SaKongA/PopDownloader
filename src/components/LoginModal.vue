@@ -17,6 +17,7 @@ import {
   createDiscreteApi,
 } from 'naive-ui'
 import {
+  fetchFileLoginSupport,
   fetchLoginQrcode,
   fetchOneClickLoginSupport,
   fetchQrcodeStatus,
@@ -56,6 +57,12 @@ const oneClickStep = ref('idle')
 const oneClickHint = ref('')
 const oneClickSessionId = ref('')
 const oneClickProfile = ref(null)
+const cookieFileInput = ref(null)
+const fileLoginStep = ref('idle')
+const fileLoginHint = ref('')
+const fileLoginSessionId = ref('')
+const fileLoginProfile = ref(null)
+const cookieFolderPathHint = '%AppData%\\SodaMusic\\Network'
 
 let pollingRound = 0
 
@@ -107,6 +114,13 @@ function resetLoginState() {
   oneClickHint.value = ''
   oneClickSessionId.value = ''
   oneClickProfile.value = null
+  fileLoginStep.value = 'idle'
+  fileLoginHint.value = ''
+  fileLoginSessionId.value = ''
+  fileLoginProfile.value = null
+  if (cookieFileInput.value) {
+    cookieFileInput.value.value = ''
+  }
 }
 
 function closeModal() {
@@ -231,6 +245,100 @@ async function submitOneClickLogin() {
   } catch (error) {
     loginStep.value = 'error'
     loginHint.value = error?.message || '一键登录失败，请改用二维码登录。'
+    message.error(loginHint.value)
+  }
+}
+
+async function copyCookiePath() {
+  try {
+    await navigator.clipboard.writeText(cookieFolderPathHint)
+    message.success('路径已复制')
+  } catch {
+    message.error('复制路径失败，请手动复制')
+  }
+}
+
+function openCookieFilePicker() {
+  cookieFileInput.value?.click()
+}
+
+async function handleCookieFileChange(event) {
+  const target = event.target
+  const file = target?.files?.[0]
+
+  if (!file) {
+    return
+  }
+
+  fileLoginStep.value = 'loading'
+  fileLoginHint.value = '正在解析 Cookies 文件并获取用户信息...'
+  fileLoginSessionId.value = ''
+  fileLoginProfile.value = null
+
+  try {
+    const arrayBuffer = await file.arrayBuffer()
+    const bytes = new Uint8Array(arrayBuffer)
+    let binary = ''
+
+    for (let index = 0; index < bytes.length; index += 1) {
+      binary += String.fromCharCode(bytes[index])
+    }
+
+    const supportPayload = await fetchFileLoginSupport({
+      fileName: file.name,
+      fileContentBase64: btoa(binary),
+    })
+
+    if (!supportPayload?.supported) {
+      fileLoginStep.value = 'unsupported'
+      fileLoginHint.value = supportPayload?.message || '当前 Cookies 文件不可用'
+      return
+    }
+
+    const sessionid = String(supportPayload?.sessionid || '').trim()
+
+    if (!sessionid) {
+      fileLoginStep.value = 'unsupported'
+      fileLoginHint.value = 'Cookies 文件解析成功，但未读取到 sessionid'
+      return
+    }
+
+    fileLoginSessionId.value = sessionid
+    const profilePayload = await fetchUserProfile({
+      aid: platformAidMap.pc,
+      sessionid,
+    })
+
+    fileLoginProfile.value = normalizeUserProfile(profilePayload)
+    fileLoginStep.value = 'ready'
+    fileLoginHint.value = '已从 Cookies 文件中读取登录态，可直接登录'
+  } catch (error) {
+    fileLoginStep.value = 'unsupported'
+    fileLoginHint.value = error?.message || 'Cookies 文件解析失败'
+  } finally {
+    if (target) {
+      target.value = ''
+    }
+  }
+}
+
+async function submitFileLogin() {
+  if (!fileLoginSessionId.value) {
+    message.error('当前没有可用的 sessionid。')
+    return
+  }
+
+  loginStep.value = 'profile-loading'
+  loginHint.value = '正在完成文件登录，请稍候...'
+
+  try {
+    await finishLogin({
+      aid: platformAidMap.pc,
+      sessionid: fileLoginSessionId.value,
+    })
+  } catch (error) {
+    loginStep.value = 'error'
+    loginHint.value = error?.message || '文件登录失败，请改用其他方式登录。'
     message.error(loginHint.value)
   }
 }
@@ -395,6 +503,83 @@ watch(
             status="warning"
             title="当前不支持一键登录"
             :description="oneClickHint || '未检测到可用的本地登录态。'"
+          />
+        </n-space>
+      </n-tab-pane>
+
+      <n-tab-pane name="file" tab="文件登录">
+        <n-space vertical size="large">
+          <n-space vertical :size="8">
+            <n-text strong>
+              请上传汽水音乐 PC 端 Cookies 文件
+            </n-text>
+            <n-text depth="3">
+              文件夹位置：{{ cookieFolderPathHint }}
+            </n-text>
+            <n-text depth="3">
+              如果找不到，可在资源管理器地址栏输入：%AppData%\SodaMusic\Network
+            </n-text>
+            <n-text depth="3">
+              使用文件登录前，必须保证汽水音乐 PC 端已登录，并且已经完全退出。
+            </n-text>
+            <n-space>
+              <n-button secondary @click="copyCookiePath">
+                复制文件夹路径
+              </n-button>
+              <n-button secondary @click="openCookieFilePicker">
+                选择 Cookies 文件
+              </n-button>
+            </n-space>
+            <input
+              ref="cookieFileInput"
+              type="file"
+              style="display: none;"
+              @change="handleCookieFileChange"
+            />
+          </n-space>
+
+          <n-spin v-if="fileLoginStep === 'loading'" size="large">
+            <div style="height: 160px; width: 160px;"></div>
+          </n-spin>
+
+          <template v-else-if="fileLoginStep === 'ready' && fileLoginProfile">
+            <n-space vertical align="center" size="medium">
+              <img
+                v-if="fileLoginProfile.avatar"
+                :src="fileLoginProfile.avatar"
+                alt="file login profile avatar"
+                referrerpolicy="no-referrer"
+                style="width: 120px; height: 120px; border-radius: 9999px; object-fit: cover; display: block;"
+              />
+              <n-avatar v-else round :size="120">
+                {{ fileLoginProfile.nickname?.slice(0, 1) || 'U' }}
+              </n-avatar>
+
+              <n-space vertical align="center" :size="4">
+                <n-text strong style="font-size: 18px;">
+                  {{ fileLoginProfile.nickname }}
+                </n-text>
+                <n-text depth="3">
+                  {{ fileLoginHint }}
+                </n-text>
+              </n-space>
+
+              <n-button
+                type="primary"
+                block
+                :loading="loginStep === 'profile-loading'"
+                @click="submitFileLogin"
+              >
+                文件登录
+              </n-button>
+            </n-space>
+          </template>
+
+          <n-result
+            v-else-if="fileLoginStep === 'unsupported'"
+            status="warning"
+            title="文件登录不可用"
+            :description="fileLoginHint || '当前 Cookies 文件不可用'"
           />
         </n-space>
       </n-tab-pane>
