@@ -8,6 +8,7 @@ import {
   NModal,
   NRadioButton,
   NRadioGroup,
+  NResult,
   NSpace,
   NSpin,
   NTabPane,
@@ -15,7 +16,12 @@ import {
   NText,
   createDiscreteApi,
 } from 'naive-ui'
-import { fetchLoginQrcode, fetchQrcodeStatus, fetchUserProfile } from '../api/auth'
+import {
+  fetchLoginQrcode,
+  fetchOneClickLoginSupport,
+  fetchQrcodeStatus,
+  fetchUserProfile,
+} from '../api/auth'
 import { setStoredProfile, setStoredSession } from '../utils/authStorage'
 
 const props = defineProps({
@@ -36,7 +42,7 @@ const platformAidMap = {
 
 const { message } = createDiscreteApi(['message'])
 
-const loginMode = ref('qrcode')
+const loginMode = ref('one-click')
 const loginStep = ref('idle')
 const loginHint = ref('')
 const qrcodeImage = ref('')
@@ -46,6 +52,10 @@ const scannedAvatar = ref('')
 const manualPlatform = ref('pc')
 const manualAid = ref(platformAidMap.pc)
 const manualSessionId = ref('')
+const oneClickStep = ref('idle')
+const oneClickHint = ref('')
+const oneClickSessionId = ref('')
+const oneClickProfile = ref(null)
 
 let pollingRound = 0
 
@@ -83,7 +93,7 @@ function normalizeUserProfile(payload) {
 }
 
 function resetLoginState() {
-  loginMode.value = 'qrcode'
+  loginMode.value = 'one-click'
   loginStep.value = 'idle'
   loginHint.value = ''
   qrcodeImage.value = ''
@@ -93,6 +103,10 @@ function resetLoginState() {
   manualPlatform.value = 'pc'
   manualAid.value = platformAidMap.pc
   manualSessionId.value = ''
+  oneClickStep.value = 'idle'
+  oneClickHint.value = ''
+  oneClickSessionId.value = ''
+  oneClickProfile.value = null
 }
 
 function closeModal() {
@@ -155,6 +169,68 @@ async function openQrcodeLogin() {
   } catch (error) {
     loginStep.value = 'error'
     loginHint.value = error?.message || '登录二维码获取失败，请稍后重试。'
+    message.error(loginHint.value)
+  }
+}
+
+async function detectOneClickLogin() {
+  oneClickStep.value = 'loading'
+  oneClickHint.value = '正在检测本地 SodaMusic 登录态...'
+  oneClickSessionId.value = ''
+  oneClickProfile.value = null
+
+  try {
+    const supportPayload = await fetchOneClickLoginSupport()
+
+    if (!supportPayload?.supported) {
+      oneClickStep.value = 'unsupported'
+      oneClickHint.value = supportPayload?.message || '当前环境不支持一键登录。'
+      return
+    }
+
+    const sessionid = String(supportPayload?.sessionid || '').trim()
+
+    if (!sessionid) {
+      oneClickStep.value = 'unsupported'
+      oneClickHint.value = '检测到支持一键登录，但未读取到 sessionid。'
+      return
+    }
+
+    oneClickSessionId.value = sessionid
+    oneClickHint.value = '已检测到本地登录态，正在获取用户信息...'
+
+    const session = {
+      aid: platformAidMap.pc,
+      sessionid,
+    }
+
+    const profilePayload = await fetchUserProfile(session)
+    oneClickProfile.value = normalizeUserProfile(profilePayload)
+    oneClickStep.value = 'ready'
+    oneClickHint.value = '已检测到汽水音乐PC端已登录，可直接一键登录'
+  } catch (error) {
+    oneClickStep.value = 'unsupported'
+    oneClickHint.value = error?.message || '检测一键登录支持失败。'
+  }
+}
+
+async function submitOneClickLogin() {
+  if (!oneClickSessionId.value) {
+    message.error('当前没有可用的 sessionid。')
+    return
+  }
+
+  loginStep.value = 'profile-loading'
+  loginHint.value = '正在完成一键登录，请稍候...'
+
+  try {
+    await finishLogin({
+      aid: platformAidMap.pc,
+      sessionid: oneClickSessionId.value,
+    })
+  } catch (error) {
+    loginStep.value = 'error'
+    loginHint.value = error?.message || '一键登录失败，请改用二维码登录。'
     message.error(loginHint.value)
   }
 }
@@ -255,6 +331,7 @@ watch(
   (show) => {
     if (show) {
       openQrcodeLogin()
+      detectOneClickLogin()
       return
     }
 
@@ -276,6 +353,52 @@ watch(
     @update:show="(value) => { if (!value) closeModal() }"
   >
     <n-tabs v-model:value="loginMode" type="line" animated>
+      <n-tab-pane name="one-click" tab="一键登录">
+        <n-space vertical align="center" justify="center" size="large">
+          <n-spin v-if="oneClickStep === 'loading'" size="large">
+            <div style="height: 160px; width: 160px;"></div>
+          </n-spin>
+
+          <template v-else-if="oneClickStep === 'ready' && oneClickProfile">
+            <img
+              v-if="oneClickProfile.avatar"
+              :src="oneClickProfile.avatar"
+              alt="one click profile avatar"
+              referrerpolicy="no-referrer"
+              style="width: 160px; height: 160px; border-radius: 9999px; object-fit: cover; display: block;"
+            />
+            <n-avatar v-else round :size="160">
+              {{ oneClickProfile.nickname?.slice(0, 1) || 'U' }}
+            </n-avatar>
+
+            <n-space vertical align="center" :size="6">
+              <n-text strong style="font-size: 18px;">
+                {{ oneClickProfile.nickname }}
+              </n-text>
+              <n-text depth="3">
+                {{ oneClickHint }}
+              </n-text>
+            </n-space>
+
+            <n-button
+              type="primary"
+              block
+              :loading="loginStep === 'profile-loading'"
+              @click="submitOneClickLogin"
+            >
+              一键登录
+            </n-button>
+          </template>
+
+          <n-result
+            v-else
+            status="warning"
+            title="当前不支持一键登录"
+            :description="oneClickHint || '未检测到可用的本地登录态。'"
+          />
+        </n-space>
+      </n-tab-pane>
+
       <n-tab-pane name="qrcode" tab="二维码登录">
         <n-space vertical align="center" justify="center" size="large">
           <n-spin v-if="loginStep === 'loading' || loginStep === 'profile-loading'" size="large">

@@ -59,3 +59,20 @@ export async function fetchUserProfile(session) {
 
   return parseApiResponse(response, '获取个人信息失败')
 }
+
+export async function fetchOneClickLoginSupport() {
+  const response = await fetch('/api/auth/one-click-support')
+  let payload = null
+
+  try {
+    payload = await response.json()
+  } catch {
+    throw new Error('检测一键登录支持失败')
+  }
+
+  if (!response.ok) {
+    throw new Error(payload?.error || payload?.message || '检测一键登录支持失败')
+  }
+
+  return payload
+}
