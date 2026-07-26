@@ -139,13 +139,21 @@ function getTrackV2Payload(reqBody) {
 }
 
 async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
-  const trackV2Url = buildUrl(endpoints.trackV2, { aid })
+  const trackV2Url = buildUrl(endpoints.trackV2, {
+    aid,
+    iid: fixed.iid,
+    version_code: fixed.version_code,
+    app_version: fixed.app_version,
+    device_platform: fixed.device_platform,
+  })
   const trackV2Response = await fetch(trackV2Url, {
     method: 'POST',
     headers: {
       Cookie: `sessionid=${sessionid};`,
       'Content-Type': 'application/json; charset=utf-8',
       'Accept-Encoding': 'gzip, deflate',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 LunaPC/3.2.1',
     },
     body: JSON.stringify({
       track_id,

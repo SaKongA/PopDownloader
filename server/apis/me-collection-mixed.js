@@ -50,10 +50,18 @@ module.exports = {
     }
 
     try {
-      const target = buildUrl(endpoints.meCollectionMixed, { aid })
+      const target = buildUrl(endpoints.meCollectionMixed, {
+        aid,
+        iid: fixed.iid,
+        version_code: fixed.version_code,
+        app_version: fixed.app_version,
+        device_platform: fixed.device_platform,
+      })
       const upstream = await fetch(target, {
         headers: {
           Cookie: `sessionid=${sessionid};`,
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 LunaPC/3.2.1',
         },
       })
 

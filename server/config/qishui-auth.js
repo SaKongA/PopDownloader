@@ -15,7 +15,9 @@ const fixed = {
   os_region: 'cn',
   sim_region: '',
   iid: '27960026095955',
-  version_code: '30020100',
+  version_code: '3020100',
+  app_version: '3.2.1',
+  device_platform: 'windows',
 }
 
 module.exports = {
