@@ -40,6 +40,8 @@ const downloadProgress = ref(0)
 const downloadProgressTotal = ref(0)
 const downloadStatusModalVisible = ref(false)
 const downloadCancelRequested = ref(false)
+// 单曲下载的输出格式：original 保留上游原始容器，mp3 走本地转码
+const downloadingFormat = ref('original')
 // 当前进行中的下载句柄（Promise 上挂了 abort），用于「取消下载」
 let activeDownload = null
 const videoQualityLoading = ref(false)
@@ -324,6 +326,7 @@ function resetDownloadState() {
   downloadProgress.value = 0
   downloadProgressTotal.value = 0
   downloadCancelRequested.value = false
+  downloadingFormat.value = 'original'
   activeDownload = null
 }
 
@@ -384,7 +387,7 @@ function handleDownloadModalShow(value) {
   downloadStatusModalVisible.value = false
 }
 
-function handleDownloadQuality(row) {
+function handleDownloadQuality(row, format = 'original') {
   const trackId = getTrackId(props.resource)
 
   if (!trackId) {
@@ -392,16 +395,22 @@ function handleDownloadQuality(row) {
     return
   }
 
+  const isMp3 = format === 'mp3'
+  const baseName = `${detail.value?.name || 'track'}-${row.quality}`
+
+  downloadingFormat.value = format
+
   runDownload({
     resourceType: 'audio',
     row,
     request: ({ onProgress }) => downloadEncryptedTrackWithProgress({
       trackId,
       quality: row.quality,
+      format,
       onProgress,
     }),
-    fallbackFileName: `${detail.value?.name || 'track'}-${row.quality}-encrypted.bin`,
-    successText: `已开始下载 ${row.quality} 加密文件。`,
+    fallbackFileName: isMp3 ? `${baseName}.mp3` : `${baseName}-encrypted.bin`,
+    successText: isMp3 ? `已开始下载 ${row.quality} MP3。` : `已开始下载 ${row.quality} 原始文件。`,
     failText: '下载加密文件失败',
   })
 }
@@ -590,14 +599,32 @@ const qualityActionColumn = {
       }
 
       return h(
-        NButton,
+        NSpace,
+        { size: 8, wrap: false },
         {
-          secondary: true,
-          size: 'small',
-          loading: downloadingQuality.value === row.key,
-          onClick: () => handleDownloadQuality(row),
+          default: () => [
+            h(
+              NButton,
+              {
+                secondary: true,
+                size: 'small',
+                loading: downloadingQuality.value === row.key && downloadingFormat.value === 'original',
+                onClick: () => handleDownloadQuality(row, 'original'),
+              },
+              { default: () => '下载原始' },
+            ),
+            h(
+              NButton,
+              {
+                secondary: true,
+                size: 'small',
+                loading: downloadingQuality.value === row.key && downloadingFormat.value === 'mp3',
+                onClick: () => handleDownloadQuality(row, 'mp3'),
+              },
+              { default: () => '转 MP3' },
+            ),
+          ],
         },
-        { default: () => '下载音频' },
       )
     },
   }
@@ -749,7 +776,7 @@ watch(
   <n-modal
     :show="downloadStatusModalVisible"
     preset="card"
-    :title="downloadingResourceType === 'video' ? '正在下载视频' : downloadingResourceType === 'video-audio' ? '正在提取音频' : '正在下载音频'"
+    :title="downloadingResourceType === 'video' ? '正在下载视频' : downloadingResourceType === 'video-audio' ? '正在提取音频' : downloadingFormat === 'mp3' ? '正在下载并转码 MP3' : '正在下载音频'"
     style="width: 420px;"
     :mask-closable="false"
     :close-on-esc="true"
@@ -768,6 +795,9 @@ watch(
         </span>
         <span v-else-if="downloadingResourceType === 'video-audio'">
           正在用纯 JS 从视频中提取音频并转为 MP3，准备阶段可能会暂时看不到进度。
+        </span>
+        <span v-else-if="downloadingFormat === 'mp3'">
+          下载完成后会在本地转码为 320kbps MP3，转码阶段进度会停在 100% 稍等片刻。可随时点击「取消下载」中断。
         </span>
         <span v-else>
           下载由本地服务代理完成，可随时点击「取消下载」中断。

@@ -2,6 +2,7 @@ const { endpoints, fixed, getPcQuery } = require('../config/qishui-auth')
 const { buildUrl, fetchWithRetry } = require('./http')
 const { TrackDecryptor } = require('./track-decryptor')
 const { FlacMetadataWriter } = require('./flac-metadata')
+const { TrackMp3Transcoder, DEFAULT_KBPS } = require('./track-mp3-transcoder')
 
 function getArtistName(trackPayload) {
   const artists = Array.isArray(trackPayload?.track?.artists) ? trackPayload.track.artists : []
@@ -192,6 +193,8 @@ async function downloadTrackMedia({
   track_id,
   quality,
   aid = fixed.aid,
+  format = 'original',
+  kbps = DEFAULT_KBPS,
 }) {
   const flacMetadataWriter = new FlacMetadataWriter()
   const trackPayload = await fetchTrackPayload({ aid, sessionid, track_id })
@@ -270,11 +273,39 @@ async function downloadTrackMedia({
     })
   }
 
+  // 输出格式：original 保留上游下发的原始容器（.flac / .m4a）；
+  // mp3 则统一转成 MP3（默认 320kbps）。
+  //
+  // 注意：这里只做容器 + 编码转换，音频内容与时长完全由上游按账号权限下发的音频决定，
+  // 既不解密也不改变可听内容。
+  if (format === 'mp3') {
+    const transcoded = await new TrackMp3Transcoder().transcode({
+      // 用解密后的原始流做输入，不走上面的 FLAC 标签写入结果，
+      // 避免「先写 FLAC 标签再整体解码重编码」的重复开销。标签在转码时按 ID3v2 重新写。
+      inputBuffer: result.buffer,
+      inputExtension: result.extension,
+      metadata,
+      coverBuffer: coverData?.buffer || null,
+      coverMime: coverData?.mime || null,
+      kbps,
+    })
+
+    return {
+      buffer: transcoded.buffer,
+      fileName: `${result.fileName.slice(0, -result.extension.length)}${transcoded.extension}`,
+      contentType: transcoded.contentType,
+      trackPayload,
+      sourceExtension: result.extension,
+      kbps: transcoded.kbps,
+    }
+  }
+
   return {
     buffer: outputBuffer,
     fileName: result.fileName,
     contentType: result.extension === '.flac' ? 'audio/flac' : 'audio/mp4',
     trackPayload,
+    sourceExtension: result.extension,
   }
 }
 
