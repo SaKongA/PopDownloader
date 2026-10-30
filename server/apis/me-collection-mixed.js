@@ -1,5 +1,5 @@
 const { endpoints, fixed } = require('../config/qishui-auth')
-const { buildUrl } = require('../utils/http')
+const { buildUrl, fetchWithRetry } = require('../utils/http')
 
 const request = {
   method: 'post',
@@ -51,7 +51,7 @@ module.exports = {
 
     try {
       const target = buildUrl(endpoints.meCollectionMixed, { aid })
-      const upstream = await fetch(target, {
+      const upstream = await fetchWithRetry(target, {
         headers: {
           Cookie: `sessionid=${sessionid};`,
         },

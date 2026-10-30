@@ -1,5 +1,5 @@
 const { endpoints, fixed, getPcQuery } = require('../config/qishui-auth')
-const { buildUrl } = require('./http')
+const { buildUrl, fetchWithRetry } = require('./http')
 const { TrackDecryptor } = require('./track-decryptor')
 const { FlacMetadataWriter } = require('./flac-metadata')
 
@@ -140,7 +140,7 @@ function getTrackV2Payload(reqBody) {
 
 async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
   const trackV2Url = buildUrl(endpoints.trackV2, getPcQuery({ aid }))
-  const trackV2Response = await fetch(trackV2Url, {
+  const trackV2Response = await fetchWithRetry(trackV2Url, {
     method: 'POST',
     headers: {
       Cookie: `sessionid=${sessionid};`,
@@ -155,7 +155,27 @@ async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
     }),
   })
 
-  const trackPayload = await trackV2Response.json()
+  const rawText = await trackV2Response.text()
+
+  // 上游被客户端签名校验拦截时会返回 200 + 空 body，
+  // 直接 JSON.parse 只会抛出无信息量的 "Unexpected end of JSON input"。
+  if (!rawText.trim()) {
+    const error = new Error('汽水音乐内容接口返回空响应：上游对该接口做了客户端签名校验，当前无法获取音频地址。登录状态本身是有效的。')
+    error.status = 502
+    error.code = 'upstream_empty_response'
+    throw error
+  }
+
+  let trackPayload = null
+
+  try {
+    trackPayload = JSON.parse(rawText)
+  } catch {
+    const error = new Error('汽水音乐内容接口返回了无法解析的内容。')
+    error.status = 502
+    error.code = 'upstream_invalid_json'
+    throw error
+  }
 
   if (!trackV2Response.ok) {
     const error = new Error(trackPayload?.error || trackPayload?.message || '获取音频信息失败')
@@ -167,7 +187,12 @@ async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
   return trackPayload
 }
 
-async function downloadTrackMedia({ sessionid, track_id, quality, aid = fixed.aid }) {
+async function downloadTrackMedia({
+  sessionid,
+  track_id,
+  quality,
+  aid = fixed.aid,
+}) {
   const flacMetadataWriter = new FlacMetadataWriter()
   const trackPayload = await fetchTrackPayload({ aid, sessionid, track_id })
   const videoModelRaw = trackPayload?.track_player?.video_model
@@ -197,7 +222,7 @@ async function downloadTrackMedia({ sessionid, track_id, quality, aid = fixed.ai
     throw error
   }
 
-  const mediaResponse = await fetch(matchedItem.main_url, {
+  const mediaResponse = await fetchWithRetry(matchedItem.main_url, {
     headers: {
       'User-Agent': 'libcurl-agent/1.0',
     },
@@ -222,21 +247,21 @@ async function downloadTrackMedia({ sessionid, track_id, quality, aid = fixed.ai
     },
   })
 
+  const metadata = buildFlacMetadata(trackPayload)
+  const coverUrl = resolveImageUrl(trackPayload?.track?.album?.url_cover)
+  let coverData = null
+
+  if (coverUrl) {
+    try {
+      coverData = await flacMetadataWriter.fetchCoverBuffer(coverUrl)
+    } catch {
+      coverData = null
+    }
+  }
+
   let outputBuffer = result.buffer
 
   if (result.extension === '.flac') {
-    const metadata = buildFlacMetadata(trackPayload)
-    const coverUrl = resolveImageUrl(trackPayload?.track?.album?.url_cover)
-    let coverData = null
-
-    if (coverUrl) {
-      try {
-        coverData = await flacMetadataWriter.fetchCoverBuffer(coverUrl)
-      } catch {
-        coverData = null
-      }
-    }
-
     outputBuffer = await flacMetadataWriter.writeBufferTags({
       flacBuffer: result.buffer,
       metadata,

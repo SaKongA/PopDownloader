@@ -1,5 +1,5 @@
 const { endpoints, fixed } = require('../config/qishui-auth')
-const { buildUrl, getSessionIdFromSetCookie } = require('../utils/http')
+const { buildUrl, fetchWithRetry, getSessionIdFromSetCookie } = require('../utils/http')
 
 const request = {
   method: 'post',
@@ -35,6 +35,40 @@ const response = {
   },
 }
 
+/**
+ * sessionid 可能出现在三处，按优先级依次兜底：
+ * 1. 响应 Set-Cookie（主路径）
+ * 2. 响应体 data.sessionid
+ * 3. 响应体 data.redirect_url 的查询参数里
+ */
+function resolveSessionId(headers, payload) {
+  // 主路径：Set-Cookie。实现复用 http.js，避免两处各写一份正则
+  const fromCookie = getSessionIdFromSetCookie(headers)
+
+  if (fromCookie) {
+    return fromCookie
+  }
+
+  const data = payload?.data || {}
+  const direct = String(data.sessionid || '').trim()
+  if (direct) {
+    return direct
+  }
+
+  const redirectUrl = String(data.redirect_url || '')
+  if (redirectUrl) {
+    const queryPart = redirectUrl.split('?')[1] || ''
+    for (const pair of queryPart.split('&')) {
+      const [key, value = ''] = pair.split('=')
+      if (key === 'sessionid' && value) {
+        return decodeURIComponent(value)
+      }
+    }
+  }
+
+  return ''
+}
+
 module.exports = {
   name: 'auth-qrcode-status',
   method: request.method,
@@ -58,14 +92,27 @@ module.exports = {
         token,
       })
 
-      const upstream = await fetch(target, {
-        method: 'POST',
-        headers: request.headers,
-        body,
-      })
+      // 扫码轮询每 2 秒一次，上游 CDN 偶发重置连接，必须重试
+      const upstream = await fetchWithRetry(
+        target,
+        {
+          method: 'POST',
+          headers: request.headers,
+          body,
+        },
+        { retries: 3, delayMs: 200 },
+      )
 
-      const payload = await upstream.json()
-      const sessionid = getSessionIdFromSetCookie(upstream.headers)
+      const raw = await upstream.text()
+      let payload = {}
+
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        payload = { message: 'upstream returned non-json', raw: raw.slice(0, 200) }
+      }
+
+      const sessionid = resolveSessionId(upstream.headers, payload)
 
       res.status(upstream.status).json({
         ...payload,
@@ -75,7 +122,7 @@ module.exports = {
         },
       })
     } catch (error) {
-      res.status(500).json({
+      res.status(502).json({
         message: 'failed',
         error: error.message,
       })

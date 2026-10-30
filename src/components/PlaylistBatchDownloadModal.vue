@@ -52,7 +52,10 @@ const completedCount = ref(0)
 const checkedTaskKeys = ref([])
 const batchProgress = ref(0)
 const currentBatchId = ref('')
+const cancelRequested = ref(false)
 let progressPollTimer = null
+// 当前进行中的下载句柄（挂在 Promise 上的 abort 方法），用于「取消下载」
+let activeDownload = null
 const { message } = createDiscreteApi(['message'])
 
 const audioQualityOptions = [
@@ -121,6 +124,7 @@ function getTagVNode(row) {
     running: '下载中',
     completed: '已完成',
     failed: '失败',
+    cancelled: '已取消',
   }
 
   return labelMap[row.status]
@@ -141,6 +145,7 @@ taskColumns[5].render = (row) => {
         running: 'info',
         completed: 'success',
         failed: 'error',
+        cancelled: 'warning',
       }[row.status],
       round: true,
       size: 'small',
@@ -597,6 +602,7 @@ async function startBatchDownload() {
   }))
 
   running.value = true
+  cancelRequested.value = false
   completedCount.value = 0
   batchProgress.value = 0
   currentBatchId.value = typeof crypto?.randomUUID === 'function'
@@ -604,17 +610,21 @@ async function startBatchDownload() {
     : `batch-${Date.now()}-${Math.random().toString(16).slice(2)}`
   startProgressPolling(currentBatchId.value)
 
+  const handle = downloadPlaylistBatchZipWithProgress({
+    playlistTitle: props.playlist?.title || 'playlist-batch-download',
+    batchId: currentBatchId.value,
+    tasks: selectedTaskRows.value.map(runTask),
+    onProgress(progress) {
+      if (progress.total > 0) {
+        batchProgress.value = Math.max(batchProgress.value, progress.percent)
+      }
+    },
+  })
+
+  activeDownload = handle
+
   try {
-    const { blob, fileName } = await downloadPlaylistBatchZipWithProgress({
-      playlistTitle: props.playlist?.title || 'playlist-batch-download',
-      batchId: currentBatchId.value,
-      tasks: selectedTaskRows.value.map(runTask),
-      onProgress(progress) {
-        if (progress.total > 0) {
-          batchProgress.value = Math.max(batchProgress.value, progress.percent)
-        }
-      },
-    })
+    const { blob, fileName } = await handle
 
     stopProgressPolling()
     triggerDownload(blob, fileName || `${props.playlist?.title || 'playlist-batch-download'}.zip`)
@@ -628,20 +638,70 @@ async function startBatchDownload() {
     message.success('压缩包已开始下载。')
   } catch (error) {
     stopProgressPolling()
+
+    const wasCancelled = Boolean(error?.aborted) || cancelRequested.value
+
     taskRows.value = taskRows.value.map((row) => (
       selectedKeys.has(row.key)
-        ? { ...row, status: 'failed', message: error?.message || '打包下载失败' }
+        ? {
+            ...row,
+            status: wasCancelled ? 'cancelled' : 'failed',
+            message: wasCancelled ? '已取消' : (error?.message || '打包下载失败'),
+          }
         : row
     ))
-    message.error(error?.message || '打包下载失败')
+
+    if (wasCancelled) {
+      message.info('已取消下载。')
+    } else {
+      message.error(error?.message || '打包下载失败')
+    }
   } finally {
+    activeDownload = null
+    cancelRequested.value = false
     running.value = false
     currentBatchId.value = ''
   }
 }
 
+/**
+ * 用户点「取消下载」或关闭弹窗时调用：中断 XHR 并停止进度轮询。
+ * 后端检测到连接断开会停止继续抓取后续曲目。
+ */
+function cancelBatchDownload() {
+  if (!running.value) {
+    return
+  }
+
+  cancelRequested.value = true
+  stopProgressPolling()
+
+  if (activeDownload && typeof activeDownload.abort === 'function') {
+    activeDownload.abort()
+  }
+}
+
+function handleModalShow(value) {
+  if (value) {
+    emit('update:show', true)
+    return
+  }
+
+  if (running.value) {
+    cancelBatchDownload()
+  }
+
+  emit('update:show', false)
+}
+
 function resetState() {
   stopProgressPolling()
+  // 重新打开面板时若还有残留请求，先中断，避免后台继续跑
+  if (activeDownload && typeof activeDownload.abort === 'function') {
+    activeDownload.abort()
+  }
+  activeDownload = null
+  cancelRequested.value = false
   loadingResources.value = false
   loadingError.value = ''
   taskRows.value = []
@@ -672,10 +732,10 @@ watch(
     preset="card"
     style="width: 1080px;"
     title="打包下载"
-    :mask-closable="!running"
-    :close-on-esc="!running"
-    :closable="!running"
-    @update:show="(value) => { if (!running) emit('update:show', value) }"
+    :mask-closable="false"
+    :close-on-esc="true"
+    :closable="true"
+    @update:show="handleModalShow"
   >
     <n-space vertical size="large">
       <n-space vertical :size="12">
@@ -722,14 +782,25 @@ watch(
             </n-text>
           </n-space>
 
-          <n-button
-            type="primary"
-            :disabled="totalTasks === 0 || running"
-            :loading="running"
-            @click="startBatchDownload"
-          >
-            开始下载
-          </n-button>
+          <n-space align="center">
+            <n-button
+              v-if="running"
+              type="error"
+              secondary
+              @click="cancelBatchDownload"
+            >
+              取消下载
+            </n-button>
+
+            <n-button
+              type="primary"
+              :disabled="totalTasks === 0 || running"
+              :loading="running"
+              @click="startBatchDownload"
+            >
+              开始下载
+            </n-button>
+          </n-space>
         </n-space>
 
         <n-empty v-if="!loadingResources && taskRows.length === 0" description="先设置条件并获取乐曲列表" />
@@ -756,6 +827,9 @@ watch(
         <n-text depth="3">
           <span v-if="running">已完成 {{ completedCount }} / {{ totalTasks }} 个文件，正在继续打包...</span>
           <span v-else>已完成 {{ completedCount }} / {{ totalTasks }} 个文件</span>
+        </n-text>
+        <n-text v-if="running" depth="3">
+          可点「取消下载」或右上角关闭按钮随时终止本次打包，已下载的部分会作废。
         </n-text>
       </n-space>
     </n-space>

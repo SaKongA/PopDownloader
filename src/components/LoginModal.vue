@@ -23,6 +23,7 @@ import {
   fetchQrcodeStatus,
   fetchUserProfile,
 } from '../api/auth'
+import { QISHUI_ANDROID_AID, QISHUI_PC_AID } from '../constants/authStorage'
 import { setStoredProfile, setStoredSession } from '../utils/authStorage'
 
 const props = defineProps({
@@ -34,11 +35,11 @@ const props = defineProps({
 
 const emit = defineEmits(['update:show', 'success'])
 
-const DEFAULT_AID = '386088'
+const DEFAULT_AID = QISHUI_PC_AID
 const QR_POLL_INTERVAL = 2500
 const platformAidMap = {
-  android: '234123',
-  pc: '386088',
+  android: QISHUI_ANDROID_AID,
+  pc: QISHUI_PC_AID,
 }
 
 const { message } = createDiscreteApi(['message'])
@@ -62,7 +63,22 @@ const fileLoginStep = ref('idle')
 const fileLoginHint = ref('')
 const fileLoginSessionId = ref('')
 const fileLoginProfile = ref(null)
-const cookieFolderPathHint = '%AppData%\\SodaMusic\\Network'
+// 首屏先按 UA 猜平台给个合理默认值，稍后 detectOneClickLogin 会用后端返回的真实路径覆盖
+const isMacClient =
+  typeof navigator !== 'undefined' &&
+  /mac/i.test(navigator.platform || navigator.userAgent || '')
+
+const cookieFolderPathHint = ref(
+  isMacClient
+    ? '~/Library/Containers/com.soda.music/Data/Library/Application Support/SodaMusic'
+    : '%AppData%\\SodaMusic\\Network',
+)
+
+const cookieAddressHint = ref(
+  isMacClient
+    ? '在「访达」按 Cmd+Shift+G，粘贴上面的路径即可跳转'
+    : '可在资源管理器地址栏输入：%AppData%\\SodaMusic\\Network',
+)
 
 let pollingRound = 0
 
@@ -82,10 +98,23 @@ function getFirstImageUrl(imageLike) {
   return imageLike.urls[0]
 }
 
-function normalizeUserProfile(payload) {
+function normalizeUserProfile(payload, allowFallback = false) {
   const myInfo = payload?.my_info
 
   if (!myInfo?.id || !myInfo?.nickname) {
+    // 上游 /luna/pc/me 会被风控拦截（200 空 body），但 sessionid 本身有效，
+    // 此时用占位资料完成登录，不阻断后续流程
+    if (allowFallback) {
+      return {
+        id: '',
+        nickname: '已登录（昵称获取失败）',
+        douyinId: '',
+        avatar: '',
+        isVip: false,
+        vipStage: '',
+      }
+    }
+
     throw new Error('个人信息返回结构不符合预期。')
   }
 
@@ -145,8 +174,16 @@ function handleManualPlatformChange(value) {
 }
 
 async function finishLogin(session) {
-  const payload = await fetchUserProfile(session)
-  const profile = normalizeUserProfile(payload)
+  let profile
+
+  try {
+    const payload = await fetchUserProfile(session)
+    profile = normalizeUserProfile(payload)
+  } catch (error) {
+    // sessionid 已经拿到，不能因为取不到昵称就判定登录失败
+    profile = normalizeUserProfile(null, true)
+    console.warn('[login] 用户资料获取失败，已降级:', error?.message)
+  }
 
   setStoredSession(session)
   setStoredProfile(profile)
@@ -211,6 +248,20 @@ async function detectOneClickLogin() {
     }
 
     oneClickSessionId.value = sessionid
+
+    // macOS 与 Windows 的 cookie 库位置完全不同，用后端给的实时路径覆盖界面提示
+    const dbPath = String(supportPayload?.cookie_db_path || '')
+    if (dbPath) {
+      cookieFolderPathHint.value = dbPath.replace(/[\\/][^\\/]+$/, '')
+    }
+
+    const platform = String(supportPayload?.platform || '')
+    if (platform === 'macOS') {
+      cookieAddressHint.value = '在「访达」按 Cmd+Shift+G，粘贴上面的路径即可跳转'
+    } else if (platform === 'Windows') {
+      cookieAddressHint.value = '可在资源管理器地址栏输入：%AppData%\\SodaMusic\\Network'
+    }
+
     oneClickHint.value = '已检测到本地登录态，正在获取用户信息...'
 
     const session = {
@@ -218,10 +269,17 @@ async function detectOneClickLogin() {
       sessionid,
     }
 
-    const profilePayload = await fetchUserProfile(session)
-    oneClickProfile.value = normalizeUserProfile(profilePayload)
+    // 昵称只用于展示，取不到不影响一键登录本身
+    try {
+      const profilePayload = await fetchUserProfile(session)
+      oneClickProfile.value = normalizeUserProfile(profilePayload)
+    } catch (error) {
+      oneClickProfile.value = normalizeUserProfile(null, true)
+      console.warn('[login] 一键登录资料获取失败，已降级:', error?.message)
+    }
+
     oneClickStep.value = 'ready'
-    oneClickHint.value = '已检测到汽水音乐PC端已登录，可直接一键登录'
+    oneClickHint.value = '已检测到汽水音乐已登录，可直接一键登录'
   } catch (error) {
     oneClickStep.value = 'unsupported'
     oneClickHint.value = error?.message || '检测一键登录支持失败。'
@@ -251,7 +309,7 @@ async function submitOneClickLogin() {
 
 async function copyCookiePath() {
   try {
-    await navigator.clipboard.writeText(cookieFolderPathHint)
+    await navigator.clipboard.writeText(cookieFolderPathHint.value)
     message.success('路径已复制')
   } catch {
     message.error('复制路径失败，请手动复制')
@@ -367,6 +425,7 @@ async function submitManualLogin() {
 
 async function startPolling() {
   const currentRound = ++pollingRound
+  let consecutiveErrors = 0
 
   while (
     currentRound === pollingRound &&
@@ -378,6 +437,7 @@ async function startPolling() {
 
     try {
       const payload = await fetchQrcodeStatus(qrToken.value)
+      consecutiveErrors = 0
 
       if (currentRound !== pollingRound || !props.show) {
         return
@@ -414,6 +474,15 @@ async function startPolling() {
     } catch (error) {
       if (currentRound !== pollingRound) {
         return
+      }
+
+      consecutiveErrors += 1
+
+      // 单次网络抖动不应中断整个登录流程，连续失败 5 次才判定为故障
+      if (consecutiveErrors < 5 && Date.now() < (qrExpireAt.value || Infinity)) {
+        loginHint.value = `网络波动，正在重试（${consecutiveErrors}/5）...`
+        await sleep(QR_POLL_INTERVAL)
+        continue
       }
 
       loginStep.value = 'error'
@@ -517,7 +586,7 @@ watch(
               文件夹位置：{{ cookieFolderPathHint }}
             </n-text>
             <n-text depth="3">
-              如果找不到，可在资源管理器地址栏输入：%AppData%\SodaMusic\Network
+              如果找不到，{{ cookieAddressHint }}
             </n-text>
             <n-text depth="3">
               使用文件登录前，必须保证汽水音乐 PC 端已登录，并且已经完全退出。

@@ -85,7 +85,39 @@ module.exports = {
     const archive = archiver('zip', { zlib: { level: 9 } })
     const batchId = String(batch_id || '').trim()
 
+    // 客户端中途关闭/取消（前端 abort）时，res 会触发 close 且未正常结束。
+    // 这里置标记让循环尽快退出，不再为已经没人要的 ZIP 继续抓取后续曲目。
+    let clientAborted = false
+
+    res.on('close', () => {
+      if (res.writableEnded) {
+        return
+      }
+
+      clientAborted = true
+
+      try {
+        archive.destroy()
+      } catch {
+        // 归档器可能已结束，忽略
+      }
+
+      if (batchId) {
+        updateBatchProgress(batchId, {
+          status: 'cancelled',
+          error: '客户端已取消',
+        })
+        setTimeout(() => {
+          deleteBatchProgress(batchId)
+        }, 60 * 1000)
+      }
+    })
+
     archive.on('error', (error) => {
+      if (clientAborted) {
+        return
+      }
+
       if (batchId) {
         updateBatchProgress(batchId, {
           status: 'failed',
@@ -115,6 +147,10 @@ module.exports = {
 
     try {
       for (let index = 0; index < tasks.length; index += 1) {
+        if (clientAborted) {
+          return
+        }
+
         const task = tasks[index]
         const fallbackPrefix = `${String(index + 1).padStart(3, '0')}-${sanitizeFilename(task?.title || 'file')}`
 
@@ -174,6 +210,10 @@ module.exports = {
     } catch (error) {
       archive.destroy()
 
+      if (clientAborted) {
+        return
+      }
+
       if (batchId) {
         updateBatchProgress(batchId, {
           status: 'failed',
@@ -185,6 +225,10 @@ module.exports = {
       }
 
       if (!res.headersSent) {
+        // 这里已经预设了 application/zip，报错时必须改回来，
+        // 否则客户端会按压缩包去解析一段 JSON，排查时非常容易误判
+        res.removeHeader('Content-Disposition')
+        res.type('application/json')
         res.status(error.status || 500).json({
           message: 'failed',
           error: error.message,
