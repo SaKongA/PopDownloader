@@ -93,7 +93,7 @@ export async function downloadEncryptedTrack({ trackId, quality }) {
   }
 }
 
-export function downloadEncryptedTrackWithProgress({ trackId, quality, onProgress }) {
+export function downloadEncryptedTrackWithProgress({ trackId, quality, format = 'original', kbps, onProgress }) {
   if (!trackId) {
     return Promise.reject(new Error('缺少乐曲 ID。'))
   }
@@ -117,6 +117,8 @@ export function downloadEncryptedTrackWithProgress({ trackId, quality, onProgres
       ...sessionPayload,
       track_id: trackId,
       quality,
+      format,
+      ...(kbps ? { kbps } : {}),
     },
     fallbackMessage: '下载加密文件失败',
     onProgress,

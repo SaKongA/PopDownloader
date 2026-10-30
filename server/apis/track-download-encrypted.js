@@ -1,5 +1,8 @@
 const { fixed } = require('../config/qishui-auth')
 const { downloadTrackMedia, getTrackV2Payload } = require('../utils/track-download')
+const { DEFAULT_KBPS } = require('../utils/track-mp3-transcoder')
+
+const SUPPORTED_FORMATS = ['original', 'mp3']
 
 const request = {
   method: 'post',
@@ -13,6 +16,8 @@ const request = {
     sessionid: 'string',
     track_id: 'string',
     quality: 'string',
+    format: 'original | mp3',
+    kbps: DEFAULT_KBPS,
   },
 }
 
@@ -28,7 +33,7 @@ module.exports = {
   request,
   response,
   handler: async (req, res) => {
-    const { quality = '' } = req.body || {}
+    const { quality = '', format = 'original', kbps } = req.body || {}
     const trackV2Payload = getTrackV2Payload(req.body)
 
     if (!trackV2Payload.sessionid) {
@@ -52,12 +57,21 @@ module.exports = {
       return
     }
 
+    if (!SUPPORTED_FORMATS.includes(format)) {
+      res.status(400).json({
+        message: `format must be one of: ${SUPPORTED_FORMATS.join(', ')}`,
+      })
+      return
+    }
+
     try {
       const result = await downloadTrackMedia({
         aid: trackV2Payload.aid,
         sessionid: trackV2Payload.sessionid,
         track_id: trackV2Payload.track_id,
         quality,
+        format,
+        kbps: Number(kbps) || DEFAULT_KBPS,
       })
 
       res.setHeader('Content-Type', result.contentType)
