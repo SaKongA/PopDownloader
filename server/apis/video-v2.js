@@ -73,10 +73,34 @@ module.exports = {
         }),
       })
 
-      const payload = await upstream.json()
+      const raw = await upstream.text()
+
+      // 上游偶尔会返回 2xx + 空 body。直接 upstream.json() 会抛
+      // "Unexpected end of JSON input"，被 catch 成 500，前端只能看到笼统的
+      // 「获取视频信息失败」，无从判断是网络问题、参数问题还是上游故障。
+      if (!raw) {
+        res.status(502).json({
+          message: '汽水音乐视频接口返回空响应，请确认视频 ID 后重试。登录状态本身是有效的。',
+          code: 'upstream_empty_response',
+        })
+        return
+      }
+
+      let payload
+      try {
+        payload = JSON.parse(raw)
+      } catch {
+        res.status(502).json({
+          message: '汽水音乐接口返回了无法解析的内容。',
+          code: 'upstream_invalid_json',
+          raw: raw.slice(0, 200),
+        })
+        return
+      }
+
       res.status(upstream.status).json(payload)
     } catch (error) {
-      res.status(500).json({
+      res.status(502).json({
         message: 'failed',
         error: error.message,
       })
