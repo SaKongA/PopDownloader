@@ -1,3 +1,5 @@
+const { fetchWithRetry } = require('../utils/http')
+
 function extractFirstUrl(input) {
   if (typeof input !== 'string') {
     return ''
@@ -91,7 +93,7 @@ module.exports = {
     }
 
     try {
-      const upstream = await fetch(shareUrl, {
+      const upstream = await fetchWithRetry(shareUrl, {
         method: 'GET',
         redirect: 'follow',
         headers: {

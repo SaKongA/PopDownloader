@@ -1,5 +1,5 @@
 const { endpoints, fixed, getPcQuery } = require('../config/qishui-auth')
-const { buildUrl } = require('../utils/http')
+const { buildUrl, fetchWithRetry } = require('../utils/http')
 
 const request = {
   method: 'post',
@@ -62,24 +62,52 @@ module.exports = {
 
     try {
       const target = buildUrl(endpoints.trackV2, getPcQuery({ aid }))
-      const upstream = await fetch(target, {
-        method: 'POST',
-        headers: {
-          Cookie: `sessionid=${sessionid};`,
-          'Content-Type': request.headers['content-type'],
+      const upstream = await fetchWithRetry(
+        target,
+        {
+          method: 'POST',
+          headers: {
+            Cookie: `sessionid=${sessionid};`,
+            'Content-Type': request.headers['content-type'],
+          },
+          body: JSON.stringify({
+            track_id,
+            media_type,
+            queue_type,
+            scene_name,
+          }),
         },
-        body: JSON.stringify({
-          track_id,
-          media_type,
-          queue_type,
-          scene_name,
-        }),
-      })
+        { retries: 2, delayMs: 300 },
+      )
 
-      const payload = await upstream.json()
+      const raw = await upstream.text()
+
+      // 上游对内容类接口做客户端签名校验，未通过时返回 200 + 空 body。
+      // 账号类接口（如 /luna/pc/me）不受影响，所以登录态本身是有效的。
+      if (!raw) {
+        res.status(502).json({
+          message:
+            '汽水音乐内容接口返回空响应：上游对该接口做了客户端签名校验，当前无法获取歌曲信息。登录状态本身是有效的。',
+          code: 'upstream_empty_response',
+        })
+        return
+      }
+
+      let payload
+      try {
+        payload = JSON.parse(raw)
+      } catch {
+        res.status(502).json({
+          message: '汽水音乐接口返回了无法解析的内容。',
+          code: 'upstream_invalid_json',
+          raw: raw.slice(0, 200),
+        })
+        return
+      }
+
       res.status(upstream.status).json(payload)
     } catch (error) {
-      res.status(500).json({
+      res.status(502).json({
         message: 'failed',
         error: error.message,
       })

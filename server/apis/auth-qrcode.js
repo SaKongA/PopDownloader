@@ -1,5 +1,5 @@
 const { endpoints, fixed } = require('../config/qishui-auth')
-const { buildUrl } = require('../utils/http')
+const { buildUrl, fetchWithRetry } = require('../utils/http')
 
 const request = {
   method: 'get',
@@ -34,12 +34,20 @@ module.exports = {
   handler: async (_req, res) => {
     try {
       const target = buildUrl(endpoints.getQrcode, request.query)
-      const upstream = await fetch(target)
-      const payload = await upstream.json()
+
+      const upstream = await fetchWithRetry(target, {}, { retries: 3, delayMs: 200 })
+      const raw = await upstream.text()
+
+      let payload
+      try {
+        payload = raw ? JSON.parse(raw) : { message: 'empty upstream response' }
+      } catch {
+        payload = { message: 'upstream returned non-json', raw: raw.slice(0, 200) }
+      }
 
       res.status(upstream.status).json(payload)
     } catch (error) {
-      res.status(500).json({
+      res.status(502).json({
         message: 'failed',
         error: error.message,
       })

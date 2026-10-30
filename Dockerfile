@@ -13,8 +13,8 @@ RUN npm install
 # 复制整个项目到容器内
 COPY . .
 
-# 暴露容器的 3000 端口
-EXPOSE 3000
+# 暴露容器端口，需与 server/index.js 中的默认端口 3001 保持一致
+EXPOSE 3001
 
 # 设置容器启动时运行的命令
 CMD ["npm", "start"]

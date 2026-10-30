@@ -1,3 +1,5 @@
+const { resolveDeviceId } = require('../utils/device-id')
+
 const baseUrl = 'https://api.qishui.com'
 
 const fixed = {
@@ -15,13 +17,17 @@ const fixed = {
   geo_region: 'cn',
   os_region: 'cn',
   sim_region: '',
-  iid: '27960026095955',
+  // 不使用任何写死的设备号：首次运行随机生成并持久化到 ~/.popdownloader/device-id，
+  // 也可用环境变量 QISHUI_IID 覆盖。详见 utils/device-id.js
+  iid: resolveDeviceId(),
   version_name: '3.5.1',
   version_code: '30050100',
   channel: 'official',
   build_mode: 'master',
   ac: 'wifi',
   tz_name: 'Asia/Shanghai',
+  // 上游 luna_pc 接口以 Windows 客户端为基线实现，这里固定按 Windows 上报。
+  // macOS 用户同样可用：登录态来自本机客户端，不受这两个字段影响。
   device_platform: 'windows',
   device_type: 'Windows',
 }

@@ -37,14 +37,18 @@ import AccountInfoPage from './pages/AccountInfoPage.vue'
 import AboutAppPage from './pages/AboutAppPage.vue'
 import LoginModal from './components/LoginModal.vue'
 import { fetchUserProfile } from './api/auth'
+import { QISHUI_PC_AID } from './constants/authStorage'
 import {
   clearStoredAuth,
   getStoredProfile,
   getStoredSession,
   setStoredProfile,
+  setStoredSession,
 } from './utils/authStorage'
 
 const THEME_MODE_KEY = 'popDownloader.theme.mode'
+// 用户主动退出后置位，避免下次刷新又被自动登录回来
+const AUTO_LOGIN_SKIP_KEY = 'popDownloader.auth.skipAutoLogin'
 
 const activeKey = ref('single')
 const collapsed = ref(false)
@@ -125,10 +129,21 @@ function getFirstImageUrl(imageLike) {
   return imageLike.urls[0]
 }
 
-function normalizeUserProfile(payload) {
+function normalizeUserProfile(payload, allowFallback = false) {
   const myInfo = payload?.my_info
 
   if (!myInfo?.id || !myInfo?.nickname) {
+    if (allowFallback) {
+      return {
+        id: '',
+        nickname: '已登录（昵称获取失败）',
+        douyinId: '',
+        avatar: '',
+        isVip: false,
+        vipStage: '',
+      }
+    }
+
     throw new Error('个人信息返回结构不符合预期。')
   }
 
@@ -179,6 +194,8 @@ function handleLoginSuccess({ session, profile }) {
   authSession.value = session
   userProfile.value = { ...profile }
   activeKey.value = 'account'
+  // 手动登录过就恢复自动登录能力
+  localStorage.removeItem(AUTO_LOGIN_SKIP_KEY)
 }
 
 async function refreshStoredProfile() {
@@ -192,9 +209,7 @@ async function refreshStoredProfile() {
     setStoredProfile(profile)
     userProfile.value = { ...profile }
   } catch {
-    clearStoredAuth()
-    authSession.value = null
-    userProfile.value = null
+    // 资料刷新失败不清登录态：sessionid 可能仍然有效，清了会让用户莫名掉线
   }
 }
 
@@ -204,11 +219,63 @@ function handleUserAction(key) {
   }
 
   clearStoredAuth()
+  // 用户主动退出后不再自动登录，避免"退出又被登录回来"
+  localStorage.setItem(AUTO_LOGIN_SKIP_KEY, '1')
   authSession.value = null
   userProfile.value = null
 
   if (activeKey.value === 'playlists' || activeKey.value === 'account') {
     activeKey.value = 'single'
+  }
+}
+
+/**
+ * 自动登录：复用本机汽水音乐客户端的登录态，页面加载即登录，无需手动操作。
+ * 读取逻辑与「一键登录」完全一致，只是省掉了点击那一步。
+ */
+async function tryAutoLogin() {
+  if (authSession.value?.sessionid) {
+    return
+  }
+
+  if (localStorage.getItem(AUTO_LOGIN_SKIP_KEY) === '1') {
+    return
+  }
+
+  try {
+    const response = await fetch('/api/auth/one-click-support')
+
+    if (!response.ok) {
+      return
+    }
+
+    const data = await response.json()
+
+    if (!data?.supported || !data?.sessionid) {
+      return
+    }
+
+    const session = {
+      aid: String(data.aid || QISHUI_PC_AID),
+      sessionid: String(data.sessionid),
+    }
+
+    let profile = null
+
+    try {
+      const payload = await fetchUserProfile(session)
+      profile = normalizeUserProfile(payload)
+      setStoredProfile(profile)
+    } catch {
+      // 昵称只用于展示，取不到不影响登录本身
+      profile = normalizeUserProfile(null, true)
+    }
+
+    setStoredSession(session)
+    authSession.value = session
+    userProfile.value = profile ? { ...profile } : null
+  } catch {
+    // 静默失败，用户仍可手动登录
   }
 }
 
@@ -230,7 +297,12 @@ onMounted(() => {
   }
 
   checkBackend()
-  refreshStoredProfile()
+
+  if (authSession.value?.sessionid) {
+    refreshStoredProfile()
+  } else {
+    tryAutoLogin()
+  }
 })
 
 onBeforeUnmount(() => {

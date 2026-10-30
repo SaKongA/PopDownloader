@@ -3,3 +3,18 @@ dist/
 .vite/
 Docs
 Mind
+
+# 依赖锁备份、编辑器与系统杂物
+*.bak
+*.orig
+*.local
+.DS_Store
+Thumbs.db
+
+# 本地环境变量与密钥，绝不入库
+.env
+.env.*
+!.env.example
+
+# 工具产物
+mp3-output/
