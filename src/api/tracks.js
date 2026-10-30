@@ -1,4 +1,5 @@
 import { getStoredSession } from '../utils/authStorage'
+import { requestBlobWithProgress } from './xhr-download'
 
 async function parseApiResponse(response, fallbackMessage) {
   let payload = null
@@ -101,57 +102,23 @@ export function downloadEncryptedTrackWithProgress({ trackId, quality, onProgres
     return Promise.reject(new Error('缺少音质信息。'))
   }
 
-  const sessionPayload = getSessionPayload()
+  let sessionPayload = null
 
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', '/api/track/download-encrypted', true)
-    xhr.responseType = 'blob'
-    xhr.setRequestHeader('Content-Type', 'application/json')
+  try {
+    sessionPayload = getSessionPayload()
+  } catch (error) {
+    return Promise.reject(error)
+  }
 
-    xhr.onprogress = (event) => {
-      if (typeof onProgress === 'function') {
-        onProgress({
-          loaded: event.loaded,
-          total: event.lengthComputable ? event.total : 0,
-          percent: event.lengthComputable && event.total > 0
-            ? Math.min(100, Math.round((event.loaded / event.total) * 100))
-            : 0,
-        })
-      }
-    }
-
-    xhr.onload = async () => {
-      if (xhr.status < 200 || xhr.status >= 300) {
-        const text = typeof xhr.responseText === 'string' ? xhr.responseText : ''
-
-        try {
-          const payload = JSON.parse(text)
-          reject(new Error(payload?.error || payload?.message || '下载加密文件失败'))
-        } catch {
-          reject(new Error('下载加密文件失败'))
-        }
-        return
-      }
-
-      const disposition = xhr.getResponseHeader('content-disposition') || ''
-      const fileNameMatch = disposition.match(/filename="?([^"]+)"?/)
-      const fileName = fileNameMatch?.[1] ? decodeURIComponent(fileNameMatch[1]) : ''
-
-      resolve({
-        blob: xhr.response,
-        fileName,
-      })
-    }
-
-    xhr.onerror = () => {
-      reject(new Error('下载加密文件失败'))
-    }
-
-    xhr.send(JSON.stringify({
+  // 返回的 Promise 带 abort()，用于界面上「取消下载」
+  return requestBlobWithProgress({
+    url: '/api/track/download-encrypted',
+    body: {
       ...sessionPayload,
       track_id: trackId,
       quality,
-    }))
+    },
+    fallbackMessage: '下载加密文件失败',
+    onProgress,
   })
 }

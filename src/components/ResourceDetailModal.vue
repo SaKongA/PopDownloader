@@ -39,6 +39,9 @@ const downloadingTitle = ref('')
 const downloadProgress = ref(0)
 const downloadProgressTotal = ref(0)
 const downloadStatusModalVisible = ref(false)
+const downloadCancelRequested = ref(false)
+// 当前进行中的下载句柄（Promise 上挂了 abort），用于「取消下载」
+let activeDownload = null
 const videoQualityLoading = ref(false)
 const videoQualityError = ref('')
 const videoQualityRows = ref([])
@@ -313,7 +316,75 @@ function triggerEncryptedDownload(blob, filename) {
   URL.revokeObjectURL(objectUrl)
 }
 
-async function handleDownloadQuality(row) {
+function resetDownloadState() {
+  downloadStatusModalVisible.value = false
+  downloadingQuality.value = ''
+  downloadingResourceType.value = 'audio'
+  downloadingTitle.value = ''
+  downloadProgress.value = 0
+  downloadProgressTotal.value = 0
+  downloadCancelRequested.value = false
+  activeDownload = null
+}
+
+/**
+ * 三个下载入口（原始音频 / 视频 / 视频提取音频）共用一套进度弹窗与取消逻辑。
+ * request 返回的 Promise 带 abort()，用户点取消或关窗时中断请求。
+ */
+async function runDownload({ resourceType, row, request, fallbackFileName, successText, failText }) {
+  downloadingQuality.value = row.key
+  downloadingResourceType.value = resourceType
+  downloadingTitle.value = detail.value?.name || '未命名资源'
+  downloadProgress.value = 0
+  downloadProgressTotal.value = 0
+  downloadCancelRequested.value = false
+  downloadStatusModalVisible.value = true
+
+  const handle = request({
+    onProgress(progress) {
+      downloadProgress.value = progress.percent
+      downloadProgressTotal.value = progress.total
+    },
+  })
+
+  activeDownload = handle
+
+  try {
+    const { blob, fileName } = await handle
+    triggerEncryptedDownload(blob, fileName || fallbackFileName)
+    message.success(successText)
+  } catch (error) {
+    if (error?.aborted || downloadCancelRequested.value) {
+      message.info('已取消下载。')
+    } else {
+      message.error(error?.message || failText)
+    }
+  } finally {
+    resetDownloadState()
+  }
+}
+
+function cancelDownload() {
+  if (!activeDownload || typeof activeDownload.abort !== 'function') {
+    return
+  }
+
+  downloadCancelRequested.value = true
+  activeDownload.abort()
+}
+
+function handleDownloadModalShow(value) {
+  if (value) {
+    downloadStatusModalVisible.value = true
+    return
+  }
+
+  // 关窗等同于取消，避免请求还在后台跑、进度弹窗却已经消失
+  cancelDownload()
+  downloadStatusModalVisible.value = false
+}
+
+function handleDownloadQuality(row) {
   const trackId = getTrackId(props.resource)
 
   if (!trackId) {
@@ -321,106 +392,58 @@ async function handleDownloadQuality(row) {
     return
   }
 
-  downloadingQuality.value = row.key
-  downloadingResourceType.value = 'audio'
-  downloadingTitle.value = detail.value?.name || '未命名资源'
-  downloadProgress.value = 0
-  downloadProgressTotal.value = 0
-  downloadStatusModalVisible.value = true
-
-  try {
-    const { blob, fileName } = await downloadEncryptedTrackWithProgress({
+  runDownload({
+    resourceType: 'audio',
+    row,
+    request: ({ onProgress }) => downloadEncryptedTrackWithProgress({
       trackId,
       quality: row.quality,
-      onProgress(progress) {
-        downloadProgress.value = progress.percent
-        downloadProgressTotal.value = progress.total
-      },
-    })
-    triggerEncryptedDownload(blob, fileName || `${detail.value?.name || 'track'}-${row.quality}-encrypted.bin`)
-    message.success(`已开始下载 ${row.quality} 加密文件。`)
-  } catch (error) {
-    message.error(error?.message || '下载加密文件失败')
-  } finally {
-    downloadStatusModalVisible.value = false
-    downloadingQuality.value = ''
-    downloadingResourceType.value = 'audio'
-    downloadingTitle.value = ''
-    downloadProgress.value = 0
-    downloadProgressTotal.value = 0
-  }
+      onProgress,
+    }),
+    fallbackFileName: `${detail.value?.name || 'track'}-${row.quality}-encrypted.bin`,
+    successText: `已开始下载 ${row.quality} 加密文件。`,
+    failText: '下载加密文件失败',
+  })
 }
 
-async function handleDownloadVideo(row) {
+function handleDownloadVideo(row) {
   if (!row?.downloadUrl) {
     message.error('当前清晰度缺少下载地址。')
     return
   }
 
-  downloadingQuality.value = row.key
-  downloadingResourceType.value = 'video'
-  downloadingTitle.value = detail.value?.name || '未命名资源'
-  downloadProgress.value = 0
-  downloadProgressTotal.value = 0
-  downloadStatusModalVisible.value = true
-
-  try {
-    const { blob, fileName } = await downloadVideoWithProgress({
+  runDownload({
+    resourceType: 'video',
+    row,
+    request: ({ onProgress }) => downloadVideoWithProgress({
       url: row.downloadUrl,
       fileName: row.videoFileName,
-      onProgress(progress) {
-        downloadProgress.value = progress.percent
-        downloadProgressTotal.value = progress.total
-      },
-    })
-    triggerEncryptedDownload(blob, fileName || row.videoFileName || `${detail.value?.name || 'video'}.mp4`)
-    message.success(`已开始下载 ${row.definition || row.quality} 视频。`)
-  } catch (error) {
-    message.error(error?.message || '下载视频失败')
-  } finally {
-    downloadStatusModalVisible.value = false
-    downloadingQuality.value = ''
-    downloadingResourceType.value = 'audio'
-    downloadingTitle.value = ''
-    downloadProgress.value = 0
-    downloadProgressTotal.value = 0
-  }
+      onProgress,
+    }),
+    fallbackFileName: row.videoFileName || `${detail.value?.name || 'video'}.mp4`,
+    successText: `已开始下载 ${row.definition || row.quality} 视频。`,
+    failText: '下载视频失败',
+  })
 }
 
-async function handleDownloadVideoAudio(row) {
+function handleDownloadVideoAudio(row) {
   if (!row?.downloadUrl) {
     message.error('当前清晰度缺少下载地址。')
     return
   }
 
-  downloadingQuality.value = row.key
-  downloadingResourceType.value = 'video-audio'
-  downloadingTitle.value = detail.value?.name || '未命名资源'
-  downloadProgress.value = 0
-  downloadProgressTotal.value = 0
-  downloadStatusModalVisible.value = true
-
-  try {
-    const { blob, fileName } = await downloadVideoAudioWithProgress({
+  runDownload({
+    resourceType: 'video-audio',
+    row,
+    request: ({ onProgress }) => downloadVideoAudioWithProgress({
       url: row.downloadUrl,
       fileName: row.audioFileName,
-      onProgress(progress) {
-        downloadProgress.value = progress.percent
-        downloadProgressTotal.value = progress.total
-      },
-    })
-    triggerEncryptedDownload(blob, fileName || row.audioFileName || `${detail.value?.name || 'video'}.mp3`)
-    message.success(`已开始提取 ${row.definition || row.quality} 视频音频。`)
-  } catch (error) {
-    message.error(error?.message || '提取视频音频失败')
-  } finally {
-    downloadStatusModalVisible.value = false
-    downloadingQuality.value = ''
-    downloadingResourceType.value = 'audio'
-    downloadingTitle.value = ''
-    downloadProgress.value = 0
-    downloadProgressTotal.value = 0
-  }
+      onProgress,
+    }),
+    fallbackFileName: row.audioFileName || `${detail.value?.name || 'video'}.mp3`,
+    successText: `已开始提取 ${row.definition || row.quality} 视频音频。`,
+    failText: '提取视频音频失败',
+  })
 }
 
 function canDownloadQuality(requirement) {
@@ -729,8 +752,9 @@ watch(
     :title="downloadingResourceType === 'video' ? '正在下载视频' : downloadingResourceType === 'video-audio' ? '正在提取音频' : '正在下载音频'"
     style="width: 420px;"
     :mask-closable="false"
-    :close-on-esc="false"
-    :closable="false"
+    :close-on-esc="true"
+    :closable="true"
+    @update:show="handleDownloadModalShow"
   >
     <n-space vertical size="large">
       <n-text>
@@ -740,13 +764,13 @@ watch(
       </n-text>
       <n-text depth="3">
         <span v-if="downloadingResourceType === 'video'">
-          视频文件将通过本地服务代理下载，当前过程不可取消。
+          视频文件将通过本地服务代理下载，可随时点击「取消下载」中断。
         </span>
         <span v-else-if="downloadingResourceType === 'video-audio'">
           正在用纯 JS 从视频中提取音频并转为 MP3，准备阶段可能会暂时看不到进度。
         </span>
         <span v-else>
-          下载由本地服务代理完成，当前过程不可取消。
+          下载由本地服务代理完成，可随时点击「取消下载」中断。
         </span>
       </n-text>
       <n-progress
@@ -760,5 +784,12 @@ watch(
         <span v-else>正在等待下载进度信息...</span>
       </n-text>
     </n-space>
+    <template #footer>
+      <n-space justify="end">
+        <n-button size="small" @click="cancelDownload">
+          取消下载
+        </n-button>
+      </n-space>
+    </template>
   </n-modal>
 </template>
