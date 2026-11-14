@@ -75,9 +75,85 @@ class TrackDecryptor {
     return `${safeTitle} - ${safeArtist}${extension}`
   }
 
+  // 识别明文音频容器。
+  detectPlaintextContainer(buffer) {
+    if (buffer.length < 12) {
+      return ''
+    }
+
+    if (buffer.subarray(0, 4).toString('ascii') === 'fLaC') {
+      return '.flac'
+    }
+
+    if (buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+      return '.m4a'
+    }
+
+    if (buffer.subarray(0, 4).toString('ascii') === 'OggS') {
+      return '.ogg'
+    }
+
+    if (
+      buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      buffer.subarray(8, 12).toString('ascii') === 'WAVE'
+    ) {
+      return '.wav'
+    }
+
+    if (
+      buffer.subarray(0, 3).toString('ascii') === 'ID3' ||
+      (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)
+    ) {
+      return '.mp3'
+    }
+
+    return ''
+  }
+
+  hasEncryptionBoxes(buffer) {
+    // 仅扫描文件头部的加密盒。
+    const head = buffer.subarray(0, Math.min(buffer.length, 2 * 1024 * 1024))
+    const signature = head.toString('latin1')
+    return ['senc', 'enca', 'sinf', 'frma', 'schm'].some((box) => signature.includes(box))
+  }
+
+  passThrough(encryptedBuffer, media = {}) {
+    const extension = this.detectPlaintextContainer(encryptedBuffer)
+
+    if (!extension) {
+      throw new Error(
+        '音频流既没有 spade_a 密钥，也不是可识别的明文音频容器，无法安全处理。',
+      )
+    }
+
+    if (this.hasEncryptionBoxes(encryptedBuffer)) {
+      throw new Error('音频流带有加密盒但缺少 spade_a 密钥，无法解密。')
+    }
+
+    return {
+      buffer: encryptedBuffer,
+      extension,
+      fileName: this.createFileName({
+        title: media.title,
+        artist: media.artist,
+        extension,
+      }),
+      meta: {
+        isFlac: extension === '.flac',
+        plaintext: true,
+        sampleCount: 0,
+        chunkCount: 0,
+      },
+    }
+  }
+
   decrypt({ encryptedBuffer, spadeA, media = {} }) {
     if (!Buffer.isBuffer(encryptedBuffer) || encryptedBuffer.length === 0) {
       throw new Error('encryptedBuffer must be a non-empty Buffer.')
+    }
+
+    if (!spadeA) {
+      return this.passThrough(encryptedBuffer, media)
     }
 
     const key = this.resolveKey(spadeA)

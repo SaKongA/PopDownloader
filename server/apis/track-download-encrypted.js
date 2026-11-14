@@ -77,6 +77,19 @@ module.exports = {
       res.setHeader('Content-Type', result.contentType)
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(result.fileName)}"`)
       res.setHeader('Content-Length', result.buffer.length)
+      // 输出播放来源与试听状态响应头。
+      res.setHeader('X-Download-Source', result.source || 'track_v2')
+      res.setHeader('X-Track-Trial', result.isTrial ? '1' : '0')
+
+      if (result.upgradeError) {
+        // 输出升级失败原因。
+        res.setHeader('X-Playback-Upgrade-Error', encodeURIComponent(result.upgradeError))
+      }
+
+      if (result.durationInfo) {
+        res.setHeader('X-Track-Full-Duration-Ms', String(result.durationInfo.fullDurationMs))
+        res.setHeader('X-Track-Playable-Ms', String(result.durationInfo.playableMs))
+      }
 
       res.send(result.buffer)
     } catch (error) {
