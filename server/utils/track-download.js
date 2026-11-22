@@ -3,6 +3,26 @@ const { buildUrl, fetchWithRetry } = require('./http')
 const { TrackDecryptor } = require('./track-decryptor')
 const { FlacMetadataWriter } = require('./flac-metadata')
 const { TrackMp3Transcoder, DEFAULT_KBPS } = require('./track-mp3-transcoder')
+const { resolveFallbackPayload } = require('./media-player')
+
+// 档位降级顺序。
+const QUALITY_FALLBACK = ['highest', 'higher', 'medium']
+
+function pickMediaItem(videoList, quality) {
+  const exact = videoList.find((item) => item?.video_meta?.quality === quality)
+  if (exact?.main_url) {
+    return exact
+  }
+
+  for (const candidate of QUALITY_FALLBACK) {
+    const item = videoList.find((entry) => entry?.video_meta?.quality === candidate)
+    if (item?.main_url) {
+      return item
+    }
+  }
+
+  return videoList.find((item) => item?.main_url) || null
+}
 
 function getArtistName(trackPayload) {
   const artists = Array.isArray(trackPayload?.track?.artists) ? trackPayload.track.artists : []
@@ -139,36 +159,49 @@ function getTrackV2Payload(reqBody) {
   }
 }
 
-async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
+const RECOVERABLE_V2_ERRORS = new Set([
+  'upstream_empty_response',
+  'upstream_invalid_json',
+  'upstream_network_error',
+])
+
+async function fetchTrackV2Payload({ aid, sessionid, track_id }) {
   const trackV2Url = buildUrl(endpoints.trackV2, getPcQuery({ aid }))
-  const trackV2Response = await fetchWithRetry(trackV2Url, {
-    method: 'POST',
-    headers: {
-      Cookie: `sessionid=${sessionid};`,
-      'Content-Type': 'application/json; charset=utf-8',
-      'Accept-Encoding': 'gzip, deflate',
-    },
-    body: JSON.stringify({
-      track_id,
-      media_type: 'track',
-      queue_type: 'search_one_track',
-      scene_name: 'search',
-    }),
-  })
+
+  let trackV2Response
+  try {
+    trackV2Response = await fetchWithRetry(trackV2Url, {
+      method: 'POST',
+      headers: {
+        Cookie: `sessionid=${sessionid};`,
+        'Content-Type': 'application/json; charset=utf-8',
+        'Accept-Encoding': 'gzip, deflate',
+      },
+      body: JSON.stringify({
+        track_id,
+        media_type: 'track',
+        queue_type: 'search_one_track',
+        scene_name: 'search',
+      }),
+    })
+  } catch (error) {
+    const wrapped = new Error(`汽水音乐内容接口请求失败：${error.message}`)
+    wrapped.code = 'upstream_network_error'
+    throw wrapped
+  }
 
   const rawText = await trackV2Response.text()
 
   // 上游被客户端签名校验拦截时会返回 200 + 空 body，
   // 直接 JSON.parse 只会抛出无信息量的 "Unexpected end of JSON input"。
   if (!rawText.trim()) {
-    const error = new Error('汽水音乐内容接口返回空响应：上游对该接口做了客户端签名校验，当前无法获取音频地址。登录状态本身是有效的。')
+    const error = new Error('track_v2 被客户端签名校验拦截（200 + 空响应）。')
     error.status = 502
     error.code = 'upstream_empty_response'
     throw error
   }
 
   let trackPayload = null
-
   try {
     trackPayload = JSON.parse(rawText)
   } catch {
@@ -178,14 +211,42 @@ async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
     throw error
   }
 
+  // 保留上游业务错误。
   if (!trackV2Response.ok) {
     const error = new Error(trackPayload?.error || trackPayload?.message || '获取音频信息失败')
     error.status = trackV2Response.status
+    error.code = 'upstream_http_error'
     error.payload = trackPayload
     throw error
   }
 
   return trackPayload
+}
+
+// 优先 track_v2，失败时进入回退链路并返回同构 payload。
+async function fetchTrackPayload({ aid = fixed.aid, sessionid, track_id }) {
+  try {
+    return await fetchTrackV2Payload({ aid, sessionid, track_id })
+  } catch (v2Error) {
+    if (!RECOVERABLE_V2_ERRORS.has(v2Error.code)) {
+      throw v2Error
+    }
+
+    try {
+      return await resolveFallbackPayload({ track_id, sessionid, aid })
+    } catch (fallbackError) {
+      const v2Reason = v2Error.code === 'upstream_empty_response'
+        ? 'track_v2 被客户端签名校验拦截（200 + 空响应）'
+        : `track_v2 请求异常（${v2Error.code}）`
+
+      const error = new Error(
+        `无法获取音频地址：${v2Reason}；回退链路失败：${fallbackError.message}`,
+      )
+      error.status = fallbackError.status || 502
+      error.code = 'upstream_unavailable'
+      throw error
+    }
+  }
 }
 
 async function downloadTrackMedia({
@@ -198,6 +259,8 @@ async function downloadTrackMedia({
 }) {
   const flacMetadataWriter = new FlacMetadataWriter()
   const trackPayload = await fetchTrackPayload({ aid, sessionid, track_id })
+  // 播放来源元信息。
+  const playback = trackPayload?.__playback || null
   const videoModelRaw = trackPayload?.track_player?.video_model
 
   if (!videoModelRaw) {
@@ -217,10 +280,10 @@ async function downloadTrackMedia({
   }
 
   const videoList = Array.isArray(videoModel?.video_list) ? videoModel.video_list : []
-  const matchedItem = videoList.find((item) => item?.video_meta?.quality === quality)
+  const matchedItem = pickMediaItem(videoList, quality)
 
   if (!matchedItem?.main_url) {
-    const error = new Error(`quality ${quality} download url not found`)
+    const error = new Error(`该歌曲没有可用的音频地址（请求档位 ${quality || '-'}）。`)
     error.status = 404
     throw error
   }
@@ -297,6 +360,15 @@ async function downloadTrackMedia({
       trackPayload,
       sourceExtension: result.extension,
       kbps: transcoded.kbps,
+      source: playback?.source || 'track_v2',
+      isTrial: Boolean(playback?.isTrial),
+      durationInfo: playback
+        ? {
+            fullDurationMs: playback.fullDurationMs,
+            playableMs: playback.playableMs,
+          }
+        : null,
+      upgradeError: playback?.upgradeError || '',
     }
   }
 
@@ -306,10 +378,20 @@ async function downloadTrackMedia({
     contentType: result.extension === '.flac' ? 'audio/flac' : 'audio/mp4',
     trackPayload,
     sourceExtension: result.extension,
+    source: playback?.source || 'track_v2',
+    isTrial: Boolean(playback?.isTrial),
+    durationInfo: playback
+      ? {
+          fullDurationMs: playback.fullDurationMs,
+          playableMs: playback.playableMs,
+        }
+      : null,
+    upgradeError: playback?.upgradeError || '',
   }
 }
 
 module.exports = {
   getTrackV2Payload,
+  fetchTrackPayload,
   downloadTrackMedia,
 }

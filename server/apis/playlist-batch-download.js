@@ -146,6 +146,10 @@ module.exports = {
     }
 
     try {
+      const failures = []
+      const trials = []
+      const upgraded = []
+
       for (let index = 0; index < tasks.length; index += 1) {
         if (clientAborted) {
           return
@@ -153,48 +157,78 @@ module.exports = {
 
         const task = tasks[index]
         const fallbackPrefix = `${String(index + 1).padStart(3, '0')}-${sanitizeFilename(task?.title || 'file')}`
+        const taskLabel = task?.title || task?.trackId || `第 ${index + 1} 项`
 
-        if (task?.action === 'audio') {
-          const result = await downloadTrackMedia({
-            sessionid,
-            track_id: task.trackId,
-            quality: task.quality,
+        try {
+          if (task?.action === 'audio') {
+            const result = await downloadTrackMedia({
+              sessionid,
+              track_id: task.trackId,
+              quality: task.quality,
+            })
+            const entryName = sanitizeFilename(task.fileName || result.fileName || `${fallbackPrefix}.bin`)
+            await appendToArchive(archive, result.buffer, entryName)
+
+            // 记录全曲升级与试听状态。
+            if (result.isTrial) {
+              const seconds = result.durationInfo
+                ? Math.round(result.durationInfo.playableMs / 1000)
+                : 60
+              const reason = result.upgradeError ? `（${result.upgradeError}）` : ''
+              trials.push(`${taskLabel}：仅 ${seconds} 秒试听片段${reason}`)
+            } else if (result.source === 'media_player') {
+              const seconds = result.durationInfo
+                ? Math.round(result.durationInfo.playableMs / 1000)
+                : 0
+              upgraded.push(`${taskLabel}：已按登录账号权益取到完整音频${seconds ? `（${seconds} 秒）` : ''}`)
+            }
+          } else if (task?.action === 'video') {
+            const upstream = await fetchVideoStream(task.downloadUrl)
+            const entryName = sanitizeFilename(task.fileName || `${fallbackPrefix}.mp4`)
+            await appendToArchive(archive, Readable.fromWeb(upstream.body), entryName)
+          } else if (task?.action === 'video-audio') {
+            const extractor = new VideoAudioExtractor()
+            const result = await extractor.extractMp3FromVideoUrl(task.downloadUrl, {
+              baseName: sanitizeFilename(task.title || fallbackPrefix),
+            })
+            const entryName = sanitizeFilename(task.fileName || `${fallbackPrefix}.mp3`)
+            await appendToArchive(archive, result.buffer, entryName)
+          }
+        } catch (error) {
+          // 单首失败不影响其余曲目。
+          failures.push(`${taskLabel}：${error.message || '未知错误'}`)
+        }
+
+        if (batchId) {
+          updateBatchProgress(batchId, {
+            completed: index + 1,
           })
-          const entryName = sanitizeFilename(task.fileName || result.fileName || `${fallbackPrefix}.bin`)
-          await appendToArchive(archive, result.buffer, entryName)
-          if (batchId) {
-            updateBatchProgress(batchId, {
-              completed: index + 1,
-            })
-          }
-          continue
+        }
+      }
+
+      if (failures.length || trials.length || upgraded.length) {
+        const lines = ['PopDownloader 批量下载说明', '']
+
+        if (upgraded.length) {
+          lines.push('【按账号权益取到全曲】以下 VIP 曲目已通过登录态获取完整音频：')
+          lines.push(...upgraded.map((line) => `  - ${line}`))
+          lines.push('')
         }
 
-        if (task?.action === 'video') {
-          const upstream = await fetchVideoStream(task.downloadUrl)
-          const entryName = sanitizeFilename(task.fileName || `${fallbackPrefix}.mp4`)
-          await appendToArchive(archive, Readable.fromWeb(upstream.body), entryName)
-          if (batchId) {
-            updateBatchProgress(batchId, {
-              completed: index + 1,
-            })
-          }
-          continue
+        if (trials.length) {
+          lines.push('【仅试听片段】以下曲目上游只下发了试听音频，并非完整歌曲：')
+          lines.push(...trials.map((line) => `  - ${line}`))
+          lines.push('')
         }
 
-        if (task?.action === 'video-audio') {
-          const extractor = new VideoAudioExtractor()
-          const result = await extractor.extractMp3FromVideoUrl(task.downloadUrl, {
-            baseName: sanitizeFilename(task.title || fallbackPrefix),
-          })
-          const entryName = sanitizeFilename(task.fileName || `${fallbackPrefix}.mp3`)
-          await appendToArchive(archive, result.buffer, entryName)
-          if (batchId) {
-            updateBatchProgress(batchId, {
-              completed: index + 1,
-            })
-          }
+        if (failures.length) {
+          lines.push('【下载失败】以下曲目未能写入压缩包：')
+          lines.push(...failures.map((line) => `  - ${line}`))
+          lines.push('')
         }
+
+        lines.push(`成功 ${tasks.length - failures.length} / ${tasks.length}`)
+        await appendToArchive(archive, Buffer.from(lines.join('\n'), 'utf8'), '下载说明.txt')
       }
 
       await archive.finalize()
@@ -202,6 +236,9 @@ module.exports = {
         updateBatchProgress(batchId, {
           completed: tasks.length,
           status: 'completed',
+          failedCount: failures.length,
+          trialCount: trials.length,
+          upgradedCount: upgraded.length,
         })
         setTimeout(() => {
           deleteBatchProgress(batchId)

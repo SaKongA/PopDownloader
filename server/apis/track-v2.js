@@ -1,5 +1,6 @@
 const { endpoints, fixed, getPcQuery } = require('../config/qishui-auth')
 const { buildUrl, fetchWithRetry } = require('../utils/http')
+const { resolveFallbackPayload } = require('../utils/media-player')
 
 const request = {
   method: 'post',
@@ -85,11 +86,8 @@ module.exports = {
       // 上游对内容类接口做客户端签名校验，未通过时返回 200 + 空 body。
       // 账号类接口（如 /luna/pc/me）不受影响，所以登录态本身是有效的。
       if (!raw) {
-        res.status(502).json({
-          message:
-            '汽水音乐内容接口返回空响应：上游对该接口做了客户端签名校验，当前无法获取歌曲信息。登录状态本身是有效的。',
-          code: 'upstream_empty_response',
-        })
+        const fallback = await resolveFallbackPayload({ track_id, sessionid, aid })
+        res.status(200).json(fallback)
         return
       }
 
